@@ -96,3 +96,17 @@ if __name__ == "__main__":
     """
         Convolution1 Ends
     """
+    """
+        Relu1 Starts
+    """
+
+    relu = nn.ReLU()
+
+    output_tensor = relu(output_tensor)
+
+    print("relu output shape", output_tensor.shape)
+    # Dump the output as npy
+    np.save("outputs/py_output_relu1.npy", output_tensor.detach().numpy())
+    """
+        Relu1 Ends
+    """

@@ -107,8 +107,7 @@ int initialize_pe_array_for_convolution(void *pe_arrays[], float *input,
   int pe_counter = 1;
   int new_height = (((height) + padding) - kernel_size) / stride + 1;
   int new_width = (((width) + padding) - kernel_size) / stride + 1;
-  double input_size =
-      input_channels * ((height) + padding) * (width + padding);
+  double input_size = input_channels * ((height) + padding) * (width + padding);
   double output_size = output_channels * new_height * new_width;
   double weight_size =
       output_channels * input_channels * kernel_size * kernel_size;
@@ -237,6 +236,25 @@ memory dnnl_conv(engine &eng, stream &eng_stream, memory::dims &src_dims,
   eng_stream.wait();
   return conv_output_mem;
 }
+memory dnnl_relu(engine &eng, stream &eng_stream, memory::dims &input_dims,
+                 float *src_data) {
+  auto src_mem_desc = memory::desc(input_dims, memory::data_type::f32,
+                                   memory::format_tag::nchw);
+  auto src_mem = memory(src_mem_desc, eng, src_data);
+  auto output_mem_desc = memory::desc(input_dims, memory::data_type::f32,
+                                      memory::format_tag::nchw);
+  auto output_mem = memory(output_mem_desc, eng);
+  auto relu_pd = eltwise_forward::primitive_desc(
+      eng, prop_kind::forward_inference, algorithm::eltwise_relu,
+      src_mem.get_desc(), src_mem.get_desc(), 0.0f,
+      0.0f);  // alpha and beta for ReLU are typically 0
+  auto relu_prim = eltwise_forward(relu_pd);
+  write_to_dnnl_memory(src_data, src_mem);
+  relu_prim.execute(eng_stream,
+                    {{DNNL_ARG_SRC, src_mem}, {DNNL_ARG_DST, output_mem}});
+  eng_stream.wait();
+  return output_mem;
+}
 // Common function for convolution with dfa
 void convolution_dfa(engine &eng, stream &eng_stream, memory::dims &input_dims,
                      memory::dims &weights_dims, memory::dims &bias_dims,
@@ -260,6 +278,24 @@ void convolution_dfa(engine &eng, stream &eng_stream, memory::dims &input_dims,
                    input_dims, output_dims);
   }
 }
+// Common function for relu with dfa
+void relu_dfa(engine &eng, stream &eng_stream, memory::dims &input_dims,
+              memory::dims &output_dims, void *pe_arrays[], int pe_start_index,
+              int split, int offset) {
+  std::string relu_name = "relu_output";
+  /* Perfom ReLU for all the 4 split parts */
+  for (int i = 0; i < split; i++) {
+    float *pe =
+        static_cast<float *>(pe_arrays[pe_start_index + i]);  // for input
+    float *relu_output_data =
+        static_cast<float *>(pe_arrays[pe_start_index + split + i]) +
+        offset;  // output next pe
+    auto relu_output = dnnl_relu(eng, eng_stream, input_dims, pe + offset);
+    read_from_dnnl_memory(relu_output_data, relu_output);
+    print_and_save(relu_output, relu_name + std::to_string(i + 1), "relu",
+                   input_dims, output_dims);
+  }
+}
 
 void dump_merged(int size, int pe_start_index, std::string layer_name,
                  void *pe_arrays[], int split, memory::dims &output_dims,
@@ -269,6 +305,7 @@ void dump_merged(int size, int pe_start_index, std::string layer_name,
   int channels = output_dims[1];
   int height = output_dims[2] * split;
   int width = output_dims[3];
+
   for (int i = 0; i < channels; i++) {
     for (int j = 0; j < height / split; j++) {
       for (int k = 0; k < width; k++) {
@@ -339,7 +376,15 @@ void run_resnet18(engine &eng, stream &eng_stream, void *pe_arrays[]) {
       weights_dims[3] * weights_dims[2] * weights_dims[1] * weights_dims[0];
   dump_merged(size, 1, "conv1_", pe_arrays, split, output_dims,
               (input_size + weight_size + bias_size), eng);
-  /* layer 1*/
+  /* layer 1 */
+  /* layer 2 */
+  input_dims = {1, output_channels, new_height, new_width};
+  output_dims = {1, output_channels, new_height, new_width};
+  relu_dfa(eng, eng_stream, input_dims, output_dims, pe_arrays, pe_start_index,
+           split, (input_size + weight_size + bias_size));
+  dump_merged(size, pe_start_index + split, "relu1_", pe_arrays, split,
+              output_dims, (input_size + weight_size + bias_size), eng);
+  /* layer 2*/
 }
 
 int main() {
